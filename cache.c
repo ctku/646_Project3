@@ -32,11 +32,8 @@ static cache_stat cache_stat_inst;
 static cache_stat cache_stat_data;
 
 /************************************************************/
-void set_cache_param(param, value)
-  int param;
-  int value;
+void set_cache_param(int param, int value)
 {
-
   switch (param) {
   case CACHE_PARAM_BLOCK_SIZE:
     cache_block_size = value;
@@ -80,28 +77,186 @@ void set_cache_param(param, value)
 /************************************************************/
 void init_cache()
 {
+	/* initialize the cache, and cache statistics data structures */
+	cache_line *line;
+	int i;
+	int n_sets = (cache_usize / cache_block_size) / cache_assoc;
+	int nontag_bits = LOG2(n_sets) + LOG2(cache_block_size);
+	c1.size = cache_usize;                                       /* cache size */
+	c1.associativity = cache_assoc;                              /* cache associativity */
+	c1.n_sets = n_sets;                                          /* number of cache sets */
+	c1.index_mask = (((2 << nontag_bits) - 1) >> LOG2(cache_block_size)) << LOG2(cache_block_size);/* mask to find cache index */
+	c1.index_mask_offset = LOG2(cache_block_size);               /* number of zero bits in mask */
+	c1.LRU_head = (Pcache_line *)malloc(sizeof(Pcache_line)*c1.n_sets);
+	memset(c1.LRU_head, 0, sizeof(Pcache_line)*c1.n_sets);
 
-  /* initialize the cache, and cache statistics data structures */
-
+	line = (cache_line *)malloc(sizeof(cache_line)*c1.n_sets);
+	memset(line, 0, sizeof(cache_line)*c1.n_sets);
+	for (i=0; i<c1.n_sets; i++) {
+		c1.LRU_head[i] = line + i;
+	}
 }
 /************************************************************/
 
 /************************************************************/
-void perform_access(addr, access_type)
-  unsigned addr, access_type;
+void inst_copy_mem2cache(int *old_tag, int new_tag)
 {
+	cache_stat_inst.demand_fetches ++;
+	*old_tag = new_tag;
+}
 
-  /* handle an access to the cache */
+void inst_load_hit(void)
+{
+	// do nothing
+}
 
+void inst_load_miss(int empty, int *old_tag, int new_tag)
+{
+	cache_stat_inst.misses ++;
+	if (!empty) {
+		cache_stat_inst.replacements ++;
+	}
+	inst_copy_mem2cache(old_tag, new_tag);
+}
+/************************************************************/
+
+/************************************************************/
+void data_copy_mem2cache(int *old_tag, int new_tag)
+{
+	cache_stat_data.demand_fetches ++;
+	*old_tag = new_tag;
+}
+
+void data_copy_cache2mem(int *dirty)
+{
+	cache_stat_data.copies_back ++;
+	*dirty = 0;
+}
+
+void data_load_hit(void)
+{
+	// do nothing
+}
+
+void data_load_miss(int empty, int *dirty, int *old_tag, int new_tag)
+{
+	cache_stat_data.misses ++;
+	if (empty) {
+		if (cache_writeback && *dirty)
+			data_copy_cache2mem(dirty);
+	} else {
+		cache_stat_data.replacements ++;
+	}
+	data_copy_mem2cache(old_tag, new_tag);
+}
+
+void data_write_hit(int *dirty)
+{
+	if (cache_writeback) {
+		*dirty = 1;
+	} else {
+		data_copy_cache2mem(dirty);
+	}
+}
+
+void data_write_miss(int *old_tag, int new_tag)
+{
+	if (cache_writealloc) {
+		data_copy_mem2cache(old_tag, new_tag);
+	} else {
+		int dummy;
+		data_copy_cache2mem(&dummy);
+	}
+}
+/************************************************************/
+
+/************************************************************/
+void perform_access(unsigned addr, unsigned access_type)
+{
+	/* handle an access to the cache */
+	int non_tag_bits = ceil(LOG2_FL(c1.n_sets)) + LOG2(cache_block_size);
+	int i, tag = addr >> non_tag_bits;
+	int cac_idx =  ((addr & c1.index_mask) >> c1.index_mask_offset) % c1.n_sets;
+	Pcache_line cac_line = (Pcache_line)c1.LRU_head[cac_idx];
+
+	dprintf("=================\nAdd=0x%08X\nTag=   0x%05X\nIdx=     0x%03X(%d)\n", addr, tag, cac_idx, cac_idx);
+
+	if (cac_idx == 456)
+		cac_idx = cac_idx;
+
+	for (i=0; i<c1.n_sets; i++) {
+		if (c1.LRU_head[i]->tag)
+			dprintf("Slot[%03d]: 0x%05X %d\n", i, c1.LRU_head[i]->tag, c1.LRU_head[i]->dirty);
+	}
+
+	/* update access */
+	switch (access_type) {
+	case TRACE_INST_LOAD://2
+		cache_stat_inst.accesses ++;
+		if (!cac_line->tag) {
+			// Miss
+			dprintf("[INST] Load[%d] 0x%05X => Miss(Empty)\n", cac_idx, tag);
+			inst_load_miss(1, &cac_line->tag, tag);
+		} else if (tag != cac_line->tag) {
+			// Miss
+			dprintf("[INST] Load[%d] 0x%05X => Miss(Wrong)\n", cac_idx, tag);
+			inst_load_miss(0, &cac_line->tag, tag);
+		} else {
+			// Hit
+			dprintf("[INST] Load[%d] 0x%05X => Hit\n", cac_idx, tag);
+			inst_load_hit();
+		}
+		break;
+    case TRACE_DATA_LOAD://0
+		cache_stat_data.accesses ++;
+		if (!cac_line->tag) {
+			// Miss
+			dprintf("[DATA] Load[%d] 0x%05X => Miss(Empty)\n", cac_idx, tag);
+			data_load_miss(1, &cac_line->dirty, &cac_line->tag, tag);
+		} else if (tag != cac_line->tag) {
+			// Miss
+			dprintf("[DATA] Load[%d] 0x%05X => Miss(Wrong)\n", cac_idx, tag);
+			data_load_miss(0, &cac_line->dirty, &cac_line->tag, tag);
+		} else {
+			// Hit
+			dprintf("[DATA] Load[%d] 0x%05X => Hit\n", cac_idx, tag);
+			data_load_hit();
+		}
+		break;
+    case TRACE_DATA_STORE://1
+		cache_stat_data.accesses ++;
+		if (!cac_line->tag) {
+			// Miss
+			dprintf("[DATA] Writ[%d] 0x%05X => Miss(Empty)\n", cac_idx, tag);
+			data_write_miss(&cac_line->tag, tag);
+		} else if (tag != cac_line->tag) {
+			// Miss
+			dprintf("[DATA] Writ[%d] 0x%05X => Miss(Wrong)\n", cac_idx, tag);
+			data_write_miss(&cac_line->tag, tag);
+		} else {
+			// Hit
+			dprintf("[DATA] Writ[%d] 0x%05X => Hit\n", cac_idx, tag);
+			data_write_hit(&cac_line->dirty);
+		}
+		break;
+	}
+
+	dprintf("INST miss %d repl %d  DATA miss %d repl %d\n", 
+		cache_stat_inst.misses, cache_stat_inst.replacements,
+		cache_stat_data.misses, cache_stat_data.replacements);
 }
 /************************************************************/
 
 /************************************************************/
 void flush()
 {
-
-  /* flush the cache */
-
+	/* flush the cache 
+	int i;
+	for (i=0; i<c1.n_sets; i++) {
+		if (c1.LRU_head[i]->dirty) {
+			i = i;
+		}
+	}*/
 }
 /************************************************************/
 

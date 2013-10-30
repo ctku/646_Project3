@@ -5,6 +5,12 @@
  * Donald Yeung
  */
 
+//#define DEBUG
+#ifdef DEBUG
+#define dprintf(fmt,...) fprintf(stdout,fmt,__VA_ARGS__)
+#else
+#define dprintf(fmt,...)
+#endif
 
 #define TRUE 1
 #define FALSE 0
@@ -72,3 +78,4 @@ void print_stats();
 
 /* macros */
 #define LOG2(x) ((int)( log((double)(x)) / log(2) ))
+#define LOG2_FL(x) ((float)( log((double)(x)) / log(2) ))

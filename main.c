@@ -21,6 +21,10 @@ int main(argc, argv)
   init_cache();
   play_trace(traceFile);
   print_stats();
+  {
+	  char a;
+	  scanf("%c",&a);
+  }
 }
 
 
@@ -137,8 +141,14 @@ void play_trace(inFile)
   unsigned addr, data, access_type;
   int num_inst;
 
+  int cnt = 0;
+
   num_inst = 0;
   while(read_trace_element(inFile, &access_type, &addr)) {
+
+	cnt++;
+	if (cnt == 11)
+		;//break;
 
     switch (access_type) {
     case TRACE_DATA_LOAD:
