@@ -5,7 +5,7 @@
  * Donald Yeung
  */
 
-//#define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define dprintf(fmt,...) fprintf(stdout,fmt,__VA_ARGS__)
 #else

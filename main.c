@@ -134,6 +134,7 @@ void parse_args(argc, argv)
 }
 /************************************************************/
 
+int cc = 0;
 /************************************************************/
 void play_trace(inFile)
   FILE *inFile;
@@ -146,9 +147,7 @@ void play_trace(inFile)
   num_inst = 0;
   while(read_trace_element(inFile, &access_type, &addr)) {
 
-	cnt++;
-	if (cnt == 11)
-		;//break;
+	cc++;
 
     switch (access_type) {
     case TRACE_DATA_LOAD:
