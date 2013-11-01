@@ -12,6 +12,9 @@
 #define dprintf(fmt,...)
 #endif
 
+#define CB_1WORD  1
+#define CB_1LINE  2
+
 #define TRUE 1
 #define FALSE 0
 
