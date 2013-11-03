@@ -23,16 +23,6 @@ int main(argc, argv)
   print_stats();
   {
 	  char a;
-	  extern int L_Hit, L_Miss_Emp, L_Miss, L_Miss_Dirty, W_Hit, W_Miss_Emp, W_Miss, W_Miss_Dirty, F_Dirty;
-	  printf("WRIT Hit: %d\n",W_Hit);
-	  printf("WRIT Miss (Empty): %d\n",W_Miss_Emp);
-	  printf("WRIT Miss (Non Empty): %d\n",W_Miss);
-	  printf("WRIT Miss Dirty: %d\n",W_Miss_Dirty);
-	  printf("LOAD Hit: %d\n",L_Hit);
-	  printf("LOAD Miss (Empty): %d\n",L_Miss_Emp);
-	  printf("LOAD Miss (Non Empty): %d\n",L_Miss);
-	  printf("LOAD Miss Dirty: %d\n",L_Miss_Dirty);
-	  printf("FLUSH Dirty: %d\n",F_Dirty);
 	  scanf("%c",&a);
   }
 }

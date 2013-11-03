@@ -90,12 +90,11 @@ void init_cache()
 	c1.index_mask = (((2 << nontag_bits) - 1) >> LOG2(cache_block_size)) << LOG2(cache_block_size);/* mask to find cache index */
 	c1.index_mask_offset = LOG2(cache_block_size);               /* number of zero bits in mask */
 	c1.LRU_head = (Pcache_line *)malloc(sizeof(Pcache_line)*c1.n_sets);
+	c1.LRU_tail = (Pcache_line *)malloc(sizeof(Pcache_line)*c1.n_sets);
 	memset(c1.LRU_head, 0, sizeof(Pcache_line)*c1.n_sets);
-	line = (cache_line *)malloc(sizeof(cache_line)*c1.n_sets);
-	memset(line, 0, sizeof(cache_line)*c1.n_sets);
-	for (i=0; i<c1.n_sets; i++) {
-		c1.LRU_head[i] = line + i;
-	}
+	memset(c1.LRU_tail, 0, sizeof(Pcache_line)*c1.n_sets);
+	c1.set_contents = (int *)malloc(sizeof(int)*c1.n_sets);
+	memset(c1.set_contents, 0, sizeof(int)*c1.n_sets);
 
 	// D-cache
 	c2.size = (cache_split) ? cache_dsize : cache_usize;;        /* cache size */
@@ -104,16 +103,18 @@ void init_cache()
 	nontag_bits = LOG2(c2.n_sets) + LOG2(cache_block_size);
 	c2.index_mask = (((2 << nontag_bits) - 1) >> LOG2(cache_block_size)) << LOG2(cache_block_size);/* mask to find cache index */
 	c2.index_mask_offset = LOG2(cache_block_size);               /* number of zero bits in mask */
-	c2.LRU_head = (Pcache_line *)malloc(sizeof(Pcache_line)*c2.n_sets);
-	memset(c2.LRU_head, 0, sizeof(Pcache_line)*c2.n_sets);
-	if (cache_split == TRUE) {
-		line = (cache_line *)malloc(sizeof(cache_line)*c2.n_sets);
-		memset(line, 0, sizeof(cache_line)*c2.n_sets);
+	if (cache_split) {
+		c2.LRU_head = (Pcache_line *)malloc(sizeof(Pcache_line)*c2.n_sets);
+		c2.LRU_tail = (Pcache_line *)malloc(sizeof(Pcache_line)*c2.n_sets);
+		memset(c2.LRU_head, 0, sizeof(Pcache_line)*c2.n_sets);
+		memset(c2.LRU_tail, 0, sizeof(Pcache_line)*c2.n_sets);
+		c2.set_contents = (int *)malloc(sizeof(int)*c2.n_sets);
+		memset(c2.set_contents, 0, sizeof(int)*c2.n_sets);
+	} else {
+		c2.LRU_head = c1.LRU_head;
+		c2.LRU_tail = c1.LRU_tail;
+		c2.set_contents = c1.set_contents;
 	}
-	for (i=0; i<c2.n_sets; i++) {
-		c2.LRU_head[i] = line + i;
-	}
-
 }
 /************************************************************/
 
@@ -125,18 +126,19 @@ void inst_copy_mem2cache(int *old_tag, int new_tag)
 	*old_tag = new_tag;
 }
 
-void inst_load_hit(int *dirty)
+void inst_load_hit()
 {
 	// do nothing
 }
 
-void inst_load_miss(int empty, int *dirty, int *old_tag, int new_tag)
+void inst_load_miss(int empty, int replace, int old_dirty, int *new_dirty, int *old_tag, int new_tag)
 {
 	cache_stat_inst.misses ++;
 	if (!empty) {
-		if (cache_writeback && *dirty)
-			data_copy_cache2mem(dirty, CB_1LINE);
-		cache_stat_inst.replacements ++;
+		if (cache_writeback && old_dirty)
+			data_copy_cache2mem(new_dirty, CB_1LINE);
+		if (replace)
+			cache_stat_inst.replacements ++;
 	}
 	inst_copy_mem2cache(old_tag, new_tag);
 }
@@ -157,18 +159,19 @@ void data_copy_cache2mem(int *dirty, int type)
 	*dirty = 0;
 }
 
-void data_load_hit(int *dirty)
+void data_load_hit()
 {
 	// do nothing
 }
 
-void data_load_miss(int empty, int *dirty, int *old_tag, int new_tag)
+void data_load_miss(int empty, int replace, int old_dirty, int *new_dirty, int *old_tag, int new_tag)
 {
 	cache_stat_data.misses ++;
 	if (!empty) {
-		if (cache_writeback && *dirty)
-			data_copy_cache2mem(dirty, CB_1LINE);
-		cache_stat_data.replacements ++;
+		if (cache_writeback && old_dirty)
+			data_copy_cache2mem(new_dirty, CB_1LINE);
+		if (replace)
+			cache_stat_data.replacements ++;
 	}
 	data_copy_mem2cache(old_tag, new_tag);
 }
@@ -185,22 +188,27 @@ void data_write_hit(int *dirty)
 	}
 }
 
-void data_write_miss(int empty, int *dirty, int *old_tag, int new_tag)
+void data_write_miss(int empty, int replace, int old_dirty, int *new_dirty, int *old_tag, int new_tag)
 {
 	// write through always generate 1 word to CB stats for DATA_STORE
 	if (!cache_writeback) {
-		data_copy_cache2mem(dirty, CB_1WORD);
+		int dummy;
+		data_copy_cache2mem(&dummy, CB_1WORD);
 	}
 
 	cache_stat_data.misses ++;
 	if (cache_writealloc) {
 		if (!empty) {
-			if (cache_writeback && *dirty)
-				data_copy_cache2mem(dirty, CB_1LINE);
-			cache_stat_data.replacements ++;
+			if (cache_writeback && old_dirty)
+				data_copy_cache2mem(new_dirty, CB_1LINE);
+			if (replace)
+				cache_stat_data.replacements ++;
 		}
 		data_copy_mem2cache(old_tag, new_tag);
-		*dirty = 1;
+		// then CPU write to cache again
+		if (cache_writeback) {
+			*new_dirty = 1;
+		}
 	} else {
 		// copy data from cpu to mem, no replacement
 		int dummy;
@@ -208,93 +216,219 @@ void data_write_miss(int empty, int *dirty, int *old_tag, int new_tag)
 	}
 }
 /************************************************************/
-int L_Hit = 0, L_Miss_Emp = 0, L_Miss = 0, L_Miss_Dirty = 0, W_Hit = 0, W_Miss_Emp = 0, W_Miss = 0, W_Miss_Dirty = 0, F_Dirty = 0;
 extern int cc;
 #define DPRINTF /*(cc<=22 || cc>=26)*/TRUE ? 0 : dprintf
 /************************************************************/
 void perform_access(unsigned addr, unsigned access_type)
 {
 	/* handle an access to the cache */
-	int i, c1_nontag_bits = 0, c2_nontag_bits = 0, c1_tag = 0, c2_tag = 0, c1_idx = 0, c2_idx = 0;
+	int i, c1_nontag_bits = 0, c2_nontag_bits = 0, c1_tag = 0, c2_tag = 0, c1_idx = 0, c2_idx = 0, c1_no = 0, c2_no = 0;
 	Pcache_line c1_line, c2_line;
+	Pcache_line new_node;
 
 	c1_nontag_bits = ceil(LOG2_FL(c1.n_sets)) + LOG2(cache_block_size);
 	c1_tag = addr >> c1_nontag_bits;
 	c1_idx =  ((addr & c1.index_mask) >> c1.index_mask_offset) % c1.n_sets;
 	c1_line = (Pcache_line)c1.LRU_head[c1_idx];
+	c1_no = c1.set_contents[c1_idx];
 
 	if (cache_split) {
 		c2_nontag_bits = ceil(LOG2_FL(c2.n_sets)) + LOG2(cache_block_size);
 		c2_tag = addr >> c2_nontag_bits;
 		c2_idx =  ((addr & c2.index_mask) >> c2.index_mask_offset) % c2.n_sets;
 		c2_line = (Pcache_line)c2.LRU_head[c2_idx];
+		c2_no = c2.set_contents[c2_idx];
 	} else {
 		c2_tag = c1_tag;
 		c2_idx = c1_idx;
 		c2_line = c1_line;
+		c2_no = c1_no;
 	}
 
 	/* update access */
 	switch (access_type) {
 	case TRACE_INST_LOAD://2
 		cache_stat_inst.accesses ++;
-		if (!c1_line->tag) {
+		if (c1_no == 0) {
 			// Miss
-			DPRINTF("[INST] Load[%d] 0x%05X => Miss(Empty)\n", c1_idx, c1_tag);
-			inst_load_miss(1, &c1_line->dirty, &c1_line->tag, c1_tag);
-		} else if (c1_tag != c1_line->tag) {
-			// Miss
-			DPRINTF("[INST] Load[%d] 0x%05X => Miss(Wrong)\n", c1_idx, c1_tag);
-			inst_load_miss(0, &c1_line->dirty, &c1_line->tag, c1_tag);
+			new_node = (Pcache_line)malloc(sizeof(cache_line));
+			memset(new_node, 0, sizeof(cache_line));
+			insert(&c1.LRU_head[c1_idx], &c1.LRU_tail[c1_idx], new_node);
+			c1.set_contents[c1_idx] ++;
+			inst_load_miss(1, 0, new_node->dirty, &new_node->dirty, &new_node->tag, c1_tag);
 		} else {
-			// Hit
-			DPRINTF("[INST] Load[%d] 0x%05X => Hit\n", c1_idx, c1_tag);
-			inst_load_hit(&c1_line->dirty);
+			Pcache_line cur = (Pcache_line)c1.LRU_head[c1_idx];
+			int found = 0;
+			while (cur) {
+				if (c1_tag == cur->tag) {
+					found = 1;
+					break;
+				}
+				cur = cur->LRU_next;
+			}
+			if (!found) {
+				// Miss
+				if (c1_no < cache_assoc) {
+					// Insertable
+					new_node = (Pcache_line)malloc(sizeof(cache_line));
+					memset(new_node, 0, sizeof(cache_line));
+					insert(&c1.LRU_head[c1_idx], &c1.LRU_tail[c1_idx], new_node);
+					c1.set_contents[c1_idx] ++;
+					inst_load_miss(0, 0, new_node->dirty, &new_node->dirty, &new_node->tag, c1_tag);
+				} else {
+					// Not Insertable, need replace LRU
+					// delete(tail)
+					int old_dirty = c1.LRU_tail[c1_idx]->dirty;
+					delete(&c1.LRU_head[c1_idx], &c1.LRU_tail[c1_idx], c1.LRU_tail[c1_idx]);
+					c1.set_contents[c1_idx] --;
+					// insert(new)
+					new_node = (Pcache_line)malloc(sizeof(cache_line));
+					memset(new_node, 0, sizeof(cache_line));
+					insert(&c1.LRU_head[c1_idx], &c1.LRU_tail[c1_idx], new_node);
+					c1.set_contents[c1_idx] ++;
+					inst_load_miss(0, 1, old_dirty, &new_node->dirty, &new_node->tag, c1_tag);
+				}
+			} else {
+				// Hit
+				if (c1_no > 1) {
+					// switch nodes to maintain order of LRU
+					delete(&c1.LRU_head[c1_idx], &c1.LRU_tail[c1_idx], cur);
+					insert(&c1.LRU_head[c1_idx], &c1.LRU_tail[c1_idx], cur);
+				}
+				inst_load_hit();
+			}
 		}
 		break;
     case TRACE_DATA_LOAD://0
 		cache_stat_data.accesses ++;
-		if (!c2_line->tag) {
+		if (c2_no == 0) {
 			// Miss
-			L_Miss_Emp++;
-			DPRINTF("[DATA] Load[%d] 0x%05X => Miss(Empty)\n", c2_idx, c2_tag);
-			data_load_miss(1, &c2_line->dirty, &c2_line->tag, c2_tag);
-		} else if (c2_tag != c2_line->tag) {
-			// Miss
-			L_Miss++;
-			if (c2_line->dirty) L_Miss_Dirty++;
-			DPRINTF("[DATA] Load[%d] 0x%05X => Miss(Wrong)\n", c2_idx, c2_tag);
-			data_load_miss(0, &c2_line->dirty, &c2_line->tag, c2_tag);
+			new_node = (Pcache_line)malloc(sizeof(cache_line));
+			memset(new_node, 0, sizeof(cache_line));
+			insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], new_node);
+			c2.set_contents[c2_idx] ++;
+			data_load_miss(1, 0, new_node->dirty, &new_node->dirty, &new_node->tag, c2_tag);
 		} else {
-			// Hit
-			L_Hit++;
-			DPRINTF("[DATA] Load[%d] 0x%05X => Hit\n", c2_idx, c2_tag);
-			data_load_hit(&c2_line->dirty);
+			Pcache_line cur = (Pcache_line)c2.LRU_head[c2_idx];
+			int found = 0;
+			while (cur) {
+				if (c2_tag == cur->tag) {
+					found = 1;
+					break;
+				}
+				cur = cur->LRU_next;
+			}
+			if (!found) {
+				// Miss
+				if (c2_no < cache_assoc) {
+					// Insertable
+					new_node = (Pcache_line)malloc(sizeof(cache_line));
+					memset(new_node, 0, sizeof(cache_line));
+					insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], new_node);
+					c2.set_contents[c2_idx] ++;
+					data_load_miss(0, 0, new_node->dirty, &new_node->dirty, &new_node->tag, c2_tag);
+				} else {
+					// Not Insertable, need replace LRU
+					// delete(tail)
+					int old_dirty = c2.LRU_tail[c2_idx]->dirty;
+					delete(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], c2.LRU_tail[c2_idx]);
+					if (old_dirty==1)
+						old_dirty = old_dirty;
+					c2.set_contents[c2_idx] --;
+					// insert(new)
+					new_node = (Pcache_line)malloc(sizeof(cache_line));
+					memset(new_node, 0, sizeof(cache_line));
+					insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], new_node);
+					c2.set_contents[c2_idx] ++;
+					data_load_miss(0, 1, old_dirty, &new_node->dirty, &new_node->tag, c2_tag);
+				}
+			} else {
+				// Hit
+				if (c2_no > 1) {
+					// switch nodes to maintain order of LRU
+					delete(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], cur);
+					insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], cur);
+				}
+				data_load_hit();
+			}
 		}
 		break;
     case TRACE_DATA_STORE://1
 		cache_stat_data.accesses ++;
-		if (!c2_line->tag) {
-			// Miss
-			W_Miss_Emp++;
-			data_write_miss(1, &c2_line->dirty, &c2_line->tag, c2_tag);
-		} else if (c2_tag != c2_line->tag) {
-			// Miss
-			W_Miss++;
-			if (c2_line->dirty) W_Miss_Dirty++;
-			data_write_miss(0, &c2_line->dirty, &c2_line->tag, c2_tag);
+		if (cache_writealloc) {
+			if (c2_no == 0) {
+				// Miss
+				new_node = (Pcache_line)malloc(sizeof(cache_line));
+				memset(new_node, 0, sizeof(cache_line));
+				insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], new_node);
+				c2.set_contents[c2_idx] ++;
+				data_write_miss(1, 0, new_node->dirty, &new_node->dirty, &new_node->tag, c2_tag);
+			} else {
+				Pcache_line cur = (Pcache_line)c2.LRU_head[c2_idx];
+				int found = 0;
+				while (cur) {
+					if (c2_tag == cur->tag) {
+						found = 1;
+						break;
+					}
+					cur = cur->LRU_next;
+				}
+				if (!found) {
+					// Miss
+					if (c2_no < cache_assoc) {
+						// Insertable
+						new_node = (Pcache_line)malloc(sizeof(cache_line));
+						memset(new_node, 0, sizeof(cache_line));
+						insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], new_node);
+						c2.set_contents[c2_idx] ++;
+						data_write_miss(0, 0, new_node->dirty, &new_node->dirty, &new_node->tag, c2_tag);
+					} else {
+						// Not Insertable, need replace LRU
+						// delete(tail)
+						int old_dirty = c2.LRU_tail[c2_idx]->dirty;
+						delete(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], c2.LRU_tail[c2_idx]);
+						c2.set_contents[c2_idx] --;
+						// insert(new)
+						new_node = (Pcache_line)malloc(sizeof(cache_line));
+						memset(new_node, 0, sizeof(cache_line));
+						insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], new_node);
+						c2.set_contents[c2_idx] ++;
+						data_write_miss(0, 1, old_dirty, &new_node->dirty, &new_node->tag, c2_tag);
+					}
+				} else {
+					// Hit
+					if (c2_no > 1) {
+						// switch nodes to maintain order of LRU
+						delete(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], cur);
+						insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], cur);
+					}
+					data_write_hit(&cur->dirty);
+				}
+			}
 		} else {
-			// Hit
-			W_Hit++;
-			data_write_hit(&c2_line->dirty);
+			// Write non allocate
+			Pcache_line cur = (Pcache_line)c2.LRU_head[c2_idx];
+			int found = 0, dummy = 0;
+			while (cur) {
+				if (c2_tag == cur->tag) {
+					found = 1;
+					break;
+				}
+				cur = cur->LRU_next;
+			}
+			// no cache will be modified
+			if (found) {
+				if (c2_no > 1) {
+					// switch nodes to maintain order of LRU
+					delete(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], cur);
+					insert(&c2.LRU_head[c2_idx], &c2.LRU_tail[c2_idx], cur);
+				}
+				data_write_hit(&cur->dirty);
+			} else {
+				data_write_miss(0, 0, 0, &dummy, &dummy, 0);
+			}
 		}
 		break;
-	}
-
-	if (access_type!=4) {
-		DPRINTF("INST miss %d repl %d  DATA miss %d repl %d\n", 
-			cache_stat_inst.misses, cache_stat_inst.replacements,
-			cache_stat_data.misses, cache_stat_data.replacements);
 	}
 }
 /************************************************************/
@@ -303,16 +437,21 @@ void perform_access(unsigned addr, unsigned access_type)
 void flush()
 {
 	/* flush the cache */
-	int i;
+	int i, j;
 	for (i=0; i<c1.n_sets; i++) {
-		if (c1.LRU_head[i]->dirty) {
-			data_copy_cache2mem(&c1.LRU_head[i]->dirty, CB_1LINE);
+		Pcache_line cur = c1.LRU_head[i];
+		while (cur) {
+			if (cur->dirty)
+				data_copy_cache2mem(&c1.LRU_head[i]->dirty, CB_1LINE);
+			cur = cur->LRU_next;
 		}
 	}
 	for (i=0; i<c2.n_sets; i++) {
-		if (c2.LRU_head[i]->dirty) {
-			F_Dirty++;
-			data_copy_cache2mem(&c2.LRU_head[i]->dirty, CB_1LINE);
+		Pcache_line cur = c2.LRU_head[i];
+		while (cur) {
+			if (cur->dirty)
+				data_copy_cache2mem(&c2.LRU_head[i]->dirty, CB_1LINE);
+			cur = cur->LRU_next;
 		}
 	}
 }
